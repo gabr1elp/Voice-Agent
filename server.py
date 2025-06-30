@@ -11,8 +11,8 @@ import sys
 
 load_dotenv()
 
-# Minimal logging - only critical system errors
-logging.basicConfig(level=logging.CRITICAL)
+# Enhanced logging for debugging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration with validation
@@ -30,21 +30,24 @@ PORT = int(os.getenv('PORT', 5024))
 VOICE = os.getenv('VOICE', 'sage')
 MAX_CALL_DURATION = int(os.getenv('MAX_CALL_DURATION', 300))  # 5 minutes default
 
-# Concise, focused system message
-SYSTEM_MESSAGE = """You are a sales representative for Zapstrix, an AI automation company.
+# Updated system message for better responses
+SYSTEM_MESSAGE = """You are a professional sales representative for Zapstrix, an AI automation company.
 
-Keep responses brief and natural. Only speak when the caller is clearly addressing you.
+Key guidelines:
+- Keep responses brief and conversational (1-2 sentences maximum)
+- Speak naturally and warmly
+- Ask for their name early in the conversation
+- Listen carefully and respond appropriately
+- Don't interrupt or respond to silence/background noise
 
-Key points:
-- Zapstrix builds custom AI and automation solutions for businesses
+About Zapstrix:
+- We build custom AI and automation solutions for businesses
 - We specialize in lead generation, customer support, and operational efficiency
-- Ask for their name naturally during conversation
-- Listen more than you speak
-- Be helpful, not pushy
+- We help companies save time and increase revenue through smart automation
 
-Start with: "Hello, thank you for calling Zapstrix. How can I help you today?"
+Start with: "Hello! Thank you for calling Zapstrix. How can I help you today?"
 
-Important: Wait for clear questions before responding. Don't interrupt or respond to background noise."""
+Remember: Be helpful, not pushy. Quality conversation over sales pressure."""
 
 # Session storage for conversation tracking
 ACTIVE_SESSIONS = {}
@@ -54,6 +57,7 @@ CALLER_NUMBERS = {}
 shutdown_event = asyncio.Event()
 
 def signal_handler(signum, frame):
+    logger.info("Received shutdown signal")
     shutdown_event.set()
 
 signal.signal(signal.SIGINT, signal_handler)
@@ -61,7 +65,9 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Starting Zapstrix Assistant")
     yield
+    logger.info("Shutting down Zapstrix Assistant")
     # Cleanup active sessions on shutdown
     for session_id in list(ACTIVE_SESSIONS.keys()):
         try:
@@ -76,10 +82,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware for production
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -89,8 +95,8 @@ def extract_call_summary(conversation_text: str, caller_name: str = "", caller_n
     """Extract call information using OpenAI API with proper error handling"""
     if not conversation_text.strip():
         return {
-            "caller_name": caller_name,
-            "caller_number": caller_number,
+            "caller_name": caller_name or "Unknown",
+            "caller_number": caller_number or "Unknown",
             "call_summary": "No conversation content available",
             "call_duration": "Unknown",
             "key_topics": [],
@@ -153,10 +159,11 @@ JSON:"""
             raise ValueError("No valid JSON found in response")
             
     except Exception as e:
+        logger.error(f"Error extracting call summary: {e}")
         return {
             "caller_name": caller_name or "Unknown",
             "caller_number": caller_number or "Unknown", 
-            "call_summary": f"Call completed - summary extraction failed",
+            "call_summary": f"Call completed - summary extraction failed: {str(e)}",
             "call_duration": "Unknown",
             "key_topics": ["Summary extraction failed"],
             "follow_up_needed": True
@@ -181,11 +188,15 @@ async def send_to_n8n(call_data: dict, call_sid: str):
                 response = await client.post(N8N_WEBHOOK_URL, json=payload)
                 
                 if response.status_code < 400:
+                    logger.info(f"Successfully sent call data to n8n: {response.status_code}")
                     return True
+                else:
+                    logger.warning(f"N8N webhook returned status {response.status_code}")
                     
         except Exception as e:
-            if attempt == max_retries - 1:  # Only log on final failure
-                pass  # Silent failure - no logging needed
+            logger.error(f"Attempt {attempt + 1} to send to n8n failed: {e}")
+            if attempt == max_retries - 1:
+                logger.error("Failed to send call data to n8n after all retries")
         
         if attempt < max_retries - 1:
             await asyncio.sleep(retry_delay)
@@ -199,6 +210,7 @@ async def cleanup_session(session_id: str):
         return
     
     session = ACTIVE_SESSIONS[session_id]
+    logger.info(f"Cleaning up session {session_id}")
     
     try:
         conversation_text = '\n'.join(session['conversation'])
@@ -218,11 +230,12 @@ async def cleanup_session(session_id: str):
             await send_to_n8n(call_data, session.get('call_sid', 'unknown'))
         
     except Exception as e:
-        pass  # Silent cleanup - no logging needed
+        logger.error(f"Error during session cleanup: {e}")
     finally:
         # Always clean up the session
         if session_id in ACTIVE_SESSIONS:
             del ACTIVE_SESSIONS[session_id]
+        logger.info(f"Session {session_id} cleanup complete")
 
 @app.get("/", response_class=JSONResponse)
 async def index_page():
@@ -247,6 +260,8 @@ async def handle_incoming_call(request: Request):
             caller_number = request.query_params.get('From', 'Unknown')
             call_sid = request.query_params.get('CallSid')
         
+        logger.info(f"Incoming call from {caller_number}, CallSid: {call_sid}")
+        
         # Store caller info
         if call_sid and caller_number != 'Unknown':
             CALLER_NUMBERS[call_sid] = caller_number
@@ -263,7 +278,8 @@ async def handle_incoming_call(request: Request):
         return HTMLResponse(content=str(response), media_type="application/xml")
         
     except Exception as e:
-        # Return basic TwiML even on error - no logging needed
+        logger.error(f"Error handling incoming call: {e}")
+        # Return basic TwiML even on error
         response = VoiceResponse()
         response.say("We're sorry, but we're experiencing technical difficulties. Please try again later.")
         return HTMLResponse(content=str(response), media_type="application/xml")
@@ -275,8 +291,12 @@ async def handle_media_stream(websocket: WebSocket):
     call_start_time = time.time()
     
     await websocket.accept()
+    logger.info(f"WebSocket connection established: {session_id}")
     
     try:
+        # Connect to OpenAI with improved error handling
+        logger.info(f"Connecting to OpenAI for session {session_id}")
+        
         async with websockets.connect(
             'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
             extra_headers={
@@ -289,6 +309,8 @@ async def handle_media_stream(websocket: WebSocket):
             max_size=1024*1024  # 1MB max message size
         ) as openai_ws:
             
+            logger.info(f"OpenAI connection established for session {session_id}")
+            
             # Initialize session
             ACTIVE_SESSIONS[session_id] = {
                 'conversation': [],
@@ -297,60 +319,52 @@ async def handle_media_stream(websocket: WebSocket):
                 'call_sid': None,
                 'start_time': call_start_time,
                 'last_activity': time.time(),
-                'silence_threshold': 0.5  # Minimum audio level to process
+                'openai_ws': openai_ws
             }
             
+            # Configure OpenAI session
             await send_session_update(openai_ws)
             
             stream_sid = None
             call_sid = None
+            audio_buffer = []
             
             async def send_initial_greeting():
                 """Send initial greeting after connection established"""
-                await asyncio.sleep(3)  # Longer delay to ensure stable connection
+                await asyncio.sleep(2)  # Wait for connection to stabilize
                 if openai_ws.open and session_id in ACTIVE_SESSIONS:
-                    # Clear any existing audio buffer first
-                    await openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
-                    await asyncio.sleep(0.2)
-                    
-                    greeting_message = {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "Start the call with a brief greeting."}]
+                    try:
+                        # Send greeting message
+                        greeting_message = {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "Please start the call with your greeting message."}]
+                            }
                         }
-                    }
-                    await openai_ws.send(json.dumps(greeting_message))
-                    await asyncio.sleep(0.1)
-                    await openai_ws.send(json.dumps({"type": "response.create"}))
-            
-            async def check_call_timeout():
-                """Monitor call duration and terminate if too long"""
-                while session_id in ACTIVE_SESSIONS:
-                    await asyncio.sleep(30)  # Check every 30 seconds
-                    
-                    if session_id not in ACTIVE_SESSIONS:
-                        break
+                        await openai_ws.send(json.dumps(greeting_message))
+                        await asyncio.sleep(0.1)
                         
-                    session = ACTIVE_SESSIONS[session_id]
-                    call_duration = time.time() - session['start_time']
-                    
-                    if call_duration > MAX_CALL_DURATION:
-                        break
+                        # Trigger response
+                        await openai_ws.send(json.dumps({"type": "response.create"}))
+                        logger.info(f"Sent initial greeting for session {session_id}")
+                    except Exception as e:
+                        logger.error(f"Error sending initial greeting: {e}")
             
             def is_meaningful_audio(transcript: str) -> bool:
                 """Filter out noise, background sounds, and unclear speech"""
-                if not transcript or len(transcript.strip()) < 3:
+                if not transcript or len(transcript.strip()) < 2:
                     return False
                 
                 # Filter out common noise patterns
                 noise_patterns = [
                     r'^[^a-zA-Z]*$',  # Only punctuation/symbols
-                    r'^(uh|um|ah|hm|mm)+$',  # Only filler sounds
+                    r'^(uh|um|ah|hm|mm|hmm)+$',  # Only filler sounds
                     r'^[.,!?;:\s]+$',  # Only punctuation and spaces
                     r'^\[.*\]$',  # Transcription annotations
                     r'^<.*>$',  # XML-like tags
+                    r'^(you|thank|thanks|okay|ok|yes|yeah|no|hi|hello)$',  # Very short responses
                 ]
                 
                 transcript_clean = transcript.lower().strip()
@@ -369,26 +383,32 @@ async def handle_media_stream(websocket: WebSocket):
                 
                 try:
                     async for message in websocket.iter_text():
-                        data = json.loads(message)
+                        if shutdown_event.is_set():
+                            break
+                            
+                        try:
+                            data = json.loads(message)
+                        except json.JSONDecodeError:
+                            continue
                         
                         if data['event'] == 'media' and openai_ws.open:
-                            # Validate and filter audio data
+                            # Forward audio to OpenAI
                             try:
                                 payload = data['media']['payload']
                                 if payload and len(payload) > 0:
-                                    # Only append valid audio data
                                     audio_append = {
                                         "type": "input_audio_buffer.append",
                                         "audio": payload
                                     }
                                     await openai_ws.send(json.dumps(audio_append))
-                            except (KeyError, TypeError):
-                                # Skip invalid audio packets
+                            except (KeyError, TypeError, websockets.ConnectionClosed):
                                 continue
                             
                         elif data['event'] == 'start':
                             stream_sid = data['start']['streamSid']
                             call_sid = data['start'].get('callSid')
+                            
+                            logger.info(f"Stream started - StreamSid: {stream_sid}, CallSid: {call_sid}")
                             
                             # Get caller number
                             caller_number = CALLER_NUMBERS.get(call_sid, 'Unknown')
@@ -400,19 +420,17 @@ async def handle_media_stream(websocket: WebSocket):
                                     'caller_number': caller_number
                                 })
                             
+                            # Send initial greeting
                             asyncio.create_task(send_initial_greeting())
                             
                         elif data['event'] == 'stop':
-                            # Trigger cleanup immediately when call ends
-                            asyncio.create_task(cleanup_session(session_id))
+                            logger.info(f"Twilio stream stopped for session {session_id}")
                             break
                             
                 except WebSocketDisconnect:
-                    # Trigger cleanup when WebSocket disconnects
-                    asyncio.create_task(cleanup_session(session_id))
+                    logger.info(f"Twilio WebSocket disconnected for session {session_id}")
                 except Exception as e:
-                    # Silent failure - continue processing
-                    pass
+                    logger.error(f"Error in receive_from_twilio: {e}")
                 finally:
                     if call_sid and call_sid in CALLER_NUMBERS:
                         del CALLER_NUMBERS[call_sid]
@@ -423,29 +441,36 @@ async def handle_media_stream(websocket: WebSocket):
                 
                 try:
                     async for openai_message in openai_ws:
-                        response = json.loads(openai_message)
+                        if shutdown_event.is_set():
+                            break
+                            
+                        try:
+                            response = json.loads(openai_message)
+                        except json.JSONDecodeError:
+                            continue
                         
                         # Update last activity
                         if session_id in ACTIVE_SESSIONS:
                             ACTIVE_SESSIONS[session_id]['last_activity'] = time.time()
                         
-                        # Track assistant responses
+                        # Handle different response types
                         if response['type'] == 'response.audio_transcript.done':
                             transcript = response.get('transcript', '')
                             if transcript and session_id in ACTIVE_SESSIONS:
                                 ACTIVE_SESSIONS[session_id]['conversation'].append(f"Assistant: {transcript}")
+                                logger.info(f"Assistant said: {transcript}")
                         
-                        # Track user input with filtering
-                        if response['type'] == 'conversation.item.input_audio_transcription.completed':
+                        elif response['type'] == 'conversation.item.input_audio_transcription.completed':
                             transcript = response.get('transcript', '')
                             
                             # Only process meaningful audio
                             if transcript and is_meaningful_audio(transcript) and session_id in ACTIVE_SESSIONS:
                                 ACTIVE_SESSIONS[session_id]['conversation'].append(f"Caller: {transcript}")
+                                logger.info(f"Caller said: {transcript}")
                                 
                                 # Extract caller name if not already captured
                                 if not ACTIVE_SESSIONS[session_id]['caller_name']:
-                                    # Simple name extraction - look for "I'm" or "My name is" patterns
+                                    # Simple name extraction
                                     name_patterns = [
                                         r"(?:i'm|i am|my name is|this is|it's)\s+([a-zA-Z]+)",
                                         r"^([a-zA-Z]+)(?:\s+speaking)?$"
@@ -456,80 +481,79 @@ async def handle_media_stream(websocket: WebSocket):
                                             potential_name = match.group(1).title()
                                             if len(potential_name) > 1 and potential_name.isalpha():
                                                 ACTIVE_SESSIONS[session_id]['caller_name'] = potential_name
+                                                logger.info(f"Extracted caller name: {potential_name}")
                                                 break
                         
-                        # Send audio back to Twilio with error handling
-                        if response['type'] == 'response.audio.delta' and response.get('delta'):
-                            if stream_sid:
+                        # Send audio back to Twilio
+                        elif response['type'] == 'response.audio.delta' and response.get('delta'):
+                            if stream_sid and websocket.client_state.name == 'CONNECTED':
                                 try:
-                                    # Validate base64 audio data
-                                    delta_audio = response['delta']
-                                    if delta_audio and len(delta_audio) > 0:
-                                        # Decode and re-encode to ensure valid format
-                                        decoded_audio = base64.b64decode(delta_audio)
-                                        if len(decoded_audio) > 0:
-                                            audio_payload = base64.b64encode(decoded_audio).decode('utf-8')
-                                            audio_delta = {
-                                                "event": "media",
-                                                "streamSid": stream_sid,
-                                                "media": {"payload": audio_payload}
-                                            }
-                                            await websocket.send_json(audio_delta)
-                                except (ValueError, base64.binascii.Error) as e:
-                                    # Skip corrupted audio data
-                                    continue
+                                    audio_payload = response['delta']
+                                    if audio_payload:
+                                        audio_delta = {
+                                            "event": "media",
+                                            "streamSid": stream_sid,
+                                            "media": {"payload": audio_payload}
+                                        }
+                                        await websocket.send_json(audio_delta)
                                 except Exception as e:
-                                    pass  # Continue processing audio
-                                    
+                                    logger.error(f"Error sending audio to Twilio: {e}")
+                        
+                        # Handle session errors
+                        elif response['type'] == 'error':
+                            logger.error(f"OpenAI error: {response}")
+                            
+                except websockets.ConnectionClosed:
+                    logger.info(f"OpenAI WebSocket closed for session {session_id}")
                 except Exception as e:
-                    pass  # Continue processing
+                    logger.error(f"Error in send_to_twilio: {e}")
             
-            # Run all tasks concurrently
-            timeout_task = asyncio.create_task(check_call_timeout())
-            
+            # Run both tasks concurrently
             try:
                 await asyncio.gather(
                     receive_from_twilio(),
                     send_to_twilio(),
                     return_exceptions=True
                 )
-            finally:
-                timeout_task.cancel()
+            except Exception as e:
+                logger.error(f"Error in WebSocket handling: {e}")
                 
     except Exception as e:
-        # Ensure cleanup happens even on unexpected errors
-        asyncio.create_task(cleanup_session(session_id))
+        logger.error(f"Error establishing OpenAI connection: {e}")
     finally:
-        # Final cleanup attempt - but don't double-cleanup
+        # Cleanup session
         if session_id in ACTIVE_SESSIONS:
             await cleanup_session(session_id)
 
 async def send_session_update(openai_ws):
-    """Configure OpenAI session parameters with improved voice detection and audio quality"""
+    """Configure OpenAI session parameters"""
     session_update = {
         "type": "session.update",
         "session": {
             "turn_detection": {
                 "type": "server_vad",
-                "threshold": 0.6,  # Higher threshold to reduce false positives
-                "prefix_padding_ms": 300,  # Shorter padding
-                "silence_duration_ms": 800  # Longer silence required
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 700
             },
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw", 
             "voice": VOICE,
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
-            "temperature": 0.4,  # Lower temperature for more consistent responses
+            "temperature": 0.6,
             "input_audio_transcription": {
                 "model": "whisper-1"
             }
         }
     }
-    await openai_ws.send(json.dumps(session_update))
     
-    # Add a small delay to ensure session is properly configured
-    await asyncio.sleep(0.5)
+    try:
+        await openai_ws.send(json.dumps(session_update))
+        logger.info("Session configuration sent to OpenAI")
+        await asyncio.sleep(0.5)  # Wait for configuration to take effect
+    except Exception as e:
+        logger.error(f"Error configuring OpenAI session: {e}")
 
 @app.get("/health")
 async def health_check():
@@ -544,6 +568,7 @@ async def health_check():
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception: {exc}")
     return JSONResponse(
         status_code=500,
         content={"message": "Internal server error", "type": type(exc).__name__}
@@ -557,11 +582,11 @@ if __name__ == "__main__":
             app, 
             host="0.0.0.0", 
             port=PORT,
-            log_level="error",  # Production log level
-            access_log=False    # Disable access logs for production
+            log_level="info",
+            access_log=True
         )
     except KeyboardInterrupt:
-        pass
+        logger.info("Server shutdown requested")
     except Exception as e:
-        print(f"Server startup failed: {e}")
+        logger.error(f"Server startup failed: {e}")
         sys.exit(1)
