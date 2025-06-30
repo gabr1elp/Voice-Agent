@@ -318,7 +318,7 @@ async def media_stream(websocket: WebSocket):
         logger.info(f"OpenAI connection established for session {session_id}")
         
         # Configure OpenAI session with lower temperature for less verbose responses
-        await openai_ws.send(json.dumps({
+        session_update = {
             "type": "session.update",
             "session": {
                 "turn_detection": {"type": "server_vad"},
@@ -329,20 +329,26 @@ async def media_stream(websocket: WebSocket):
                 "modalities": ["text", "audio"],
                 "temperature": 0.4,  # Lower temperature for more concise responses
                 "input_audio_transcription": {"model": "whisper-1"},
-                "max_response_output_tokens": 150,  # Limit response length
             }
-        }))
+        }
+        
+        logger.info(f"Sending session update for {session_id}")
+        await openai_ws.send(json.dumps(session_update))
+        
+        # Wait for session update confirmation
+        await asyncio.sleep(0.5)
 
         async def send_greeting():
             if shared_state["greeting_sent"] or not openai_ws.open:
                 return
             try:
+                logger.info(f"Sending greeting for session {session_id}")
                 await openai_ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {
                         "type": "message", 
                         "role": "user",
-                        "content": [{"type": "input_text", "text": "Please greet the caller briefly as instructed."}],
+                        "content": [{"type": "input_text", "text": "Say your greeting now."}],
                     },
                 }))
                 await openai_ws.send(json.dumps({"type": "response.create"}))
@@ -423,8 +429,19 @@ async def media_stream(websocket: WebSocket):
                         ACTIVE_SESSIONS[session_id]["last_activity"] = time.time()
 
                         response_type = response.get("type")
+                        logger.debug(f"OpenAI response type: {response_type}")
                         
-                        if response_type == "conversation.item.input_audio_transcription.completed":
+                        # Handle session update response
+                        if response_type == "session.updated":
+                            logger.info(f"Session updated for {session_id}")
+                        
+                        # Handle errors
+                        elif response_type == "error":
+                            error_details = response.get("error", {})
+                            logger.error(f"OpenAI error for session {session_id}: {error_details}")
+                            break
+                        
+                        elif response_type == "conversation.item.input_audio_transcription.completed":
                             transcript = response.get("transcript", "").strip()
                             confidence = response.get("confidence", 1.0)
                             
@@ -484,6 +501,9 @@ async def media_stream(websocket: WebSocket):
                     except websockets.exceptions.ConnectionClosed:
                         logger.info(f"OpenAI WebSocket closed for session {session_id}")
                         break
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON decode error for session {session_id}: {e}")
+                        continue
                         
             except Exception as e:
                 logger.error(f"Error in OpenAI message handler for session {session_id}: {e}")
