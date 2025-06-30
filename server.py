@@ -330,8 +330,7 @@ async def media_stream(websocket: WebSocket):
                 "voice": VOICE,
                 "instructions": SYSTEM_MESSAGE,
                 "modalities": ["text", "audio"],
-                "temperature": 0.5,  # Lower temperature for more consistent, concise responses
-                "max_response_output_tokens": 100,  # Limit response length
+                "temperature": 0.4,  # Slightly lower for more consistent responses
                 "input_audio_transcription": {"model": "whisper-1"},
             }
         }))
