@@ -283,8 +283,10 @@ async def handle_media_stream(websocket: WebSocket):
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "OpenAI-Beta": "realtime=v1"
             },
-            ping_interval=30,
-            ping_timeout=10
+            ping_interval=20,
+            ping_timeout=10,
+            close_timeout=10,
+            max_size=1024*1024  # 1MB max message size
         ) as openai_ws:
             
             # Initialize session
@@ -305,8 +307,12 @@ async def handle_media_stream(websocket: WebSocket):
             
             async def send_initial_greeting():
                 """Send initial greeting after connection established"""
-                await asyncio.sleep(2)  # Longer delay to ensure connection stability
-                if openai_ws.open:
+                await asyncio.sleep(3)  # Longer delay to ensure stable connection
+                if openai_ws.open and session_id in ACTIVE_SESSIONS:
+                    # Clear any existing audio buffer first
+                    await openai_ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                    await asyncio.sleep(0.2)
+                    
                     greeting_message = {
                         "type": "conversation.item.create",
                         "item": {
@@ -316,6 +322,7 @@ async def handle_media_stream(websocket: WebSocket):
                         }
                     }
                     await openai_ws.send(json.dumps(greeting_message))
+                    await asyncio.sleep(0.1)
                     await openai_ws.send(json.dumps({"type": "response.create"}))
             
             async def check_call_timeout():
@@ -365,12 +372,19 @@ async def handle_media_stream(websocket: WebSocket):
                         data = json.loads(message)
                         
                         if data['event'] == 'media' and openai_ws.open:
-                            # Only append audio if we have meaningful content
-                            audio_append = {
-                                "type": "input_audio_buffer.append",
-                                "audio": data['media']['payload']
-                            }
-                            await openai_ws.send(json.dumps(audio_append))
+                            # Validate and filter audio data
+                            try:
+                                payload = data['media']['payload']
+                                if payload and len(payload) > 0:
+                                    # Only append valid audio data
+                                    audio_append = {
+                                        "type": "input_audio_buffer.append",
+                                        "audio": payload
+                                    }
+                                    await openai_ws.send(json.dumps(audio_append))
+                            except (KeyError, TypeError):
+                                # Skip invalid audio packets
+                                continue
                             
                         elif data['event'] == 'start':
                             stream_sid = data['start']['streamSid']
@@ -444,17 +458,26 @@ async def handle_media_stream(websocket: WebSocket):
                                                 ACTIVE_SESSIONS[session_id]['caller_name'] = potential_name
                                                 break
                         
-                        # Send audio back to Twilio
+                        # Send audio back to Twilio with error handling
                         if response['type'] == 'response.audio.delta' and response.get('delta'):
                             if stream_sid:
                                 try:
-                                    audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
-                                    audio_delta = {
-                                        "event": "media",
-                                        "streamSid": stream_sid,
-                                        "media": {"payload": audio_payload}
-                                    }
-                                    await websocket.send_json(audio_delta)
+                                    # Validate base64 audio data
+                                    delta_audio = response['delta']
+                                    if delta_audio and len(delta_audio) > 0:
+                                        # Decode and re-encode to ensure valid format
+                                        decoded_audio = base64.b64decode(delta_audio)
+                                        if len(decoded_audio) > 0:
+                                            audio_payload = base64.b64encode(decoded_audio).decode('utf-8')
+                                            audio_delta = {
+                                                "event": "media",
+                                                "streamSid": stream_sid,
+                                                "media": {"payload": audio_payload}
+                                            }
+                                            await websocket.send_json(audio_delta)
+                                except (ValueError, base64.binascii.Error) as e:
+                                    # Skip corrupted audio data
+                                    continue
                                 except Exception as e:
                                     pass  # Continue processing audio
                                     
@@ -482,7 +505,7 @@ async def handle_media_stream(websocket: WebSocket):
             await cleanup_session(session_id)
 
 async def send_session_update(openai_ws):
-    """Configure OpenAI session parameters with improved voice detection"""
+    """Configure OpenAI session parameters with improved voice detection and audio quality"""
     session_update = {
         "type": "session.update",
         "session": {
@@ -504,6 +527,9 @@ async def send_session_update(openai_ws):
         }
     }
     await openai_ws.send(json.dumps(session_update))
+    
+    # Add a small delay to ensure session is properly configured
+    await asyncio.sleep(0.5)
 
 @app.get("/health")
 async def health_check():
