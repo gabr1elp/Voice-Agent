@@ -45,12 +45,15 @@ PORT            = int(os.getenv('PORT', 5024))
 VOICE           = os.getenv('VOICE', 'sage')
 MAX_CALL_DURATION = int(os.getenv('MAX_CALL_DURATION', 300))  # seconds
 
-# MUCH MORE CONCISE SYSTEM MESSAGE
+# Updated system message to be more concise
 SYSTEM_MESSAGE = (
-    "You are a sales rep for Pascual & Co. Be friendly but brief. "
-    "Ask for their name, understand their needs, explain our services concisely. "
-    "Keep responses under 2 sentences unless they ask for details. "
-    "Start: 'Hi! Thanks for calling Pascual & Co. Who am I speaking with?'"
+    "You are a professional sales representative for Pascual & Co. Be concise and direct:\n"
+    "1. Greet callers briefly: 'Hi, this is [Your Name] from Pascual & Co. Who am I speaking with?'\n"
+    "2. Listen to their needs and explain services in 1-2 sentences max.\n" 
+    "3. Ask direct questions. Keep responses under 20 words when possible.\n"
+    "4. Avoid lengthy explanations unless specifically asked.\n"
+    "5. Focus on next steps and actionable items.\n"
+    "Keep all responses brief, professional, and to the point."
 )
 
 # ---------------- helpers ----------------
@@ -122,18 +125,18 @@ def extract_call_summary(conversation_text: str, caller_name="", caller_number="
     try:
         import openai
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        prompt = f"""Analyze this sales call briefly. Extract key info only.
+        prompt = f"""Analyze this sales call and extract key information.
 
 Conversation:
 {conversation_text}
 
-Return JSON with: caller_name, caller_number, call_summary (max 100 chars), call_duration, key_topics (max 3 items), follow_up_needed (boolean)"""
+Return JSON with: caller_name, caller_number, call_summary, call_duration, key_topics (array), follow_up_needed (boolean)"""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,  # Lower temperature for more consistent output
-            max_tokens=200,   # Reduced tokens
+            temperature=0.3, 
+            max_tokens=300, 
             timeout=15,
         )
         
@@ -171,13 +174,10 @@ Return JSON with: caller_name, caller_number, call_summary (max 100 chars), call
 
 async def send_to_n8n(call_data: dict):
     try:
-        # Log what we're sending for debugging
-        logger.info(f"Sending to n8n: caller_number={call_data.get('caller_number')}, caller_name={call_data.get('caller_name')}")
-        
         timeout = httpx.Timeout(15.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(N8N_WEBHOOK_URL, json=call_data)
-            logger.info(f"Sent call data to n8n: {response.status_code}")
+            logger.info(f"Sent call data to n8n: {response.status_code} - Data: {json.dumps(call_data, indent=2)}")
             return True
     except Exception as e:
         logger.error(f"Failed to send data to n8n: {e}")
@@ -193,17 +193,18 @@ async def cleanup_session(sid: str):
     try:
         conversation_text = "\n".join(session["conversation"])
         
-        # Make sure we have the caller number
+        # Ensure we have the caller number
         caller_number = session.get("caller_number", "Unknown")
-        caller_name = session.get("caller_name", "")
-        
-        logger.info(f"Session cleanup - Caller: {caller_name}, Number: {caller_number}")
+        logger.info(f"Session {sid} cleanup - Caller number: {caller_number}")
         
         summary = extract_call_summary(
             conversation_text,
-            caller_name, 
+            session.get("caller_name", ""), 
             caller_number,
         )
+        
+        # Force the caller number to be included
+        summary["caller_number"] = caller_number
         
         summary.update({
             "timestamp": dt.datetime.utcnow().isoformat(),
@@ -213,6 +214,8 @@ async def cleanup_session(sid: str):
             "company": "Pascual & Co", 
             "call_type": "inbound_sales",
         })
+        
+        logger.info(f"Final summary for session {sid}: {json.dumps(summary, indent=2)}")
         
         # Send to n8n with timeout
         await asyncio.wait_for(send_to_n8n(summary), timeout=10)
@@ -244,7 +247,7 @@ async def incoming_call(request: Request):
         # Store caller number immediately
         if call_sid and caller != "Unknown":
             CALLER_NUMBERS[call_sid] = caller
-            logger.info(f"Stored caller number: {call_sid} -> {caller}")
+            logger.info(f"Stored caller number {caller} for CallSid {call_sid}")
         
         # Use the actual hostname from the request
         host = request.headers.get("host", request.url.hostname)
@@ -286,7 +289,7 @@ async def media_stream(websocket: WebSocket):
         "openai_ws": None
     }
 
-    # Initialize session with better caller number handling
+    # Initialize session
     ACTIVE_SESSIONS[session_id] = {
         "conversation": [], 
         "caller_name": "", 
@@ -317,8 +320,8 @@ async def media_stream(websocket: WebSocket):
         shared_state["openai_ws"] = openai_ws
         logger.info(f"OpenAI connection established for session {session_id}")
         
-        # Configure OpenAI session with lower temperature for less verbose responses
-        session_update = {
+        # Configure OpenAI session with emphasis on being concise
+        await openai_ws.send(json.dumps({
             "type": "session.update",
             "session": {
                 "turn_detection": {"type": "server_vad"},
@@ -327,28 +330,22 @@ async def media_stream(websocket: WebSocket):
                 "voice": VOICE,
                 "instructions": SYSTEM_MESSAGE,
                 "modalities": ["text", "audio"],
-                "temperature": 0.4,  # Lower temperature for more concise responses
+                "temperature": 0.5,  # Lower temperature for more consistent, concise responses
+                "max_response_output_tokens": 100,  # Limit response length
                 "input_audio_transcription": {"model": "whisper-1"},
             }
-        }
-        
-        logger.info(f"Sending session update for {session_id}")
-        await openai_ws.send(json.dumps(session_update))
-        
-        # Wait for session update confirmation
-        await asyncio.sleep(0.5)
+        }))
 
         async def send_greeting():
             if shared_state["greeting_sent"] or not openai_ws.open:
                 return
             try:
-                logger.info(f"Sending greeting for session {session_id}")
                 await openai_ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {
                         "type": "message", 
                         "role": "user",
-                        "content": [{"type": "input_text", "text": "Say your greeting now."}],
+                        "content": [{"type": "input_text", "text": "Please give a brief greeting as instructed - keep it under 15 words."}],
                     },
                 }))
                 await openai_ws.send(json.dumps({"type": "response.create"}))
@@ -429,19 +426,8 @@ async def media_stream(websocket: WebSocket):
                         ACTIVE_SESSIONS[session_id]["last_activity"] = time.time()
 
                         response_type = response.get("type")
-                        logger.debug(f"OpenAI response type: {response_type}")
                         
-                        # Handle session update response
-                        if response_type == "session.updated":
-                            logger.info(f"Session updated for {session_id}")
-                        
-                        # Handle errors
-                        elif response_type == "error":
-                            error_details = response.get("error", {})
-                            logger.error(f"OpenAI error for session {session_id}: {error_details}")
-                            break
-                        
-                        elif response_type == "conversation.item.input_audio_transcription.completed":
+                        if response_type == "conversation.item.input_audio_transcription.completed":
                             transcript = response.get("transcript", "").strip()
                             confidence = response.get("confidence", 1.0)
                             
@@ -455,23 +441,13 @@ async def media_stream(websocket: WebSocket):
                             ACTIVE_SESSIONS[session_id]["conversation"].append(f"Caller: {transcript}")
                             logger.info(f"Session {session_id} - Caller: {transcript}")
 
-                            # Extract caller name with better patterns
+                            # Extract caller name
                             if not ACTIVE_SESSIONS[session_id]["caller_name"]:
-                                name_patterns = [
-                                    r"(?:i'm|i am|my name is|this is|it's|call me)\s+([a-zA-Z]+)",
-                                    r"^([a-zA-Z]+)\s+(?:here|speaking|calling)",
-                                    r"(?:^|\s)([A-Z][a-z]+)(?:\s|$)"  # Capitalized names
-                                ]
-                                
-                                for pattern in name_patterns:
-                                    name_match = re.search(pattern, transcript, re.IGNORECASE)
-                                    if name_match:
-                                        name = name_match.group(1).title()
-                                        # Skip common words that aren't names
-                                        if name.lower() not in ['yes', 'no', 'hello', 'hi', 'thanks', 'thank', 'good', 'fine', 'well']:
-                                            ACTIVE_SESSIONS[session_id]["caller_name"] = name
-                                            logger.info(f"Extracted caller name: {name}")
-                                            break
+                                name_match = re.search(r"(?:i'm|i am|my name is|this is|it's)\s+([a-zA-Z]+)", transcript.lower())
+                                if name_match:
+                                    name = name_match.group(1).title()
+                                    ACTIVE_SESSIONS[session_id]["caller_name"] = name
+                                    logger.info(f"Extracted caller name: {name}")
 
                         elif response_type == "response.audio_transcript.done":
                             transcript = response.get("transcript", "")
@@ -501,9 +477,6 @@ async def media_stream(websocket: WebSocket):
                     except websockets.exceptions.ConnectionClosed:
                         logger.info(f"OpenAI WebSocket closed for session {session_id}")
                         break
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON decode error for session {session_id}: {e}")
-                        continue
                         
             except Exception as e:
                 logger.error(f"Error in OpenAI message handler for session {session_id}: {e}")
