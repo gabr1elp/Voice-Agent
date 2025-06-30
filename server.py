@@ -45,12 +45,12 @@ PORT            = int(os.getenv('PORT', 5024))
 VOICE           = os.getenv('VOICE', 'sage')
 MAX_CALL_DURATION = int(os.getenv('MAX_CALL_DURATION', 300))  # seconds
 
+# MUCH MORE CONCISE SYSTEM MESSAGE
 SYSTEM_MESSAGE = (
-    "You are a professional sales representative for Pascual & Co. Your role is to:\n"
-    "1. Warmly greet callers and introduce yourself.\n"
-    "2. Listen to their needs and explain Pascual & Co's services.\n" 
-    "3. Build rapport, handle objections, stay helpful.\n"
-    'Start with: "Hello! Thank you for calling Pascual & Co. I\'m here to help you today. May I ask who I\'m speaking with?"'
+    "You are a sales rep for Pascual & Co. Be friendly but brief. "
+    "Ask for their name, understand their needs, explain our services concisely. "
+    "Keep responses under 2 sentences unless they ask for details. "
+    "Start: 'Hi! Thanks for calling Pascual & Co. Who am I speaking with?'"
 )
 
 # ---------------- helpers ----------------
@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Pascual & Co Assistant",
     description="AI-powered assistant for Pascual & Co",
-    version="1.0.2",
+    version="1.0.3",
     lifespan=lifespan,
 )
 
@@ -122,18 +122,18 @@ def extract_call_summary(conversation_text: str, caller_name="", caller_number="
     try:
         import openai
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        prompt = f"""Analyze this sales call and extract key information.
+        prompt = f"""Analyze this sales call briefly. Extract key info only.
 
 Conversation:
 {conversation_text}
 
-Return JSON with: caller_name, caller_number, call_summary, call_duration, key_topics (array), follow_up_needed (boolean)"""
+Return JSON with: caller_name, caller_number, call_summary (max 100 chars), call_duration, key_topics (max 3 items), follow_up_needed (boolean)"""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3, 
-            max_tokens=300, 
+            temperature=0.1,  # Lower temperature for more consistent output
+            max_tokens=200,   # Reduced tokens
             timeout=15,
         )
         
@@ -171,6 +171,9 @@ Return JSON with: caller_name, caller_number, call_summary, call_duration, key_t
 
 async def send_to_n8n(call_data: dict):
     try:
+        # Log what we're sending for debugging
+        logger.info(f"Sending to n8n: caller_number={call_data.get('caller_number')}, caller_name={call_data.get('caller_name')}")
+        
         timeout = httpx.Timeout(15.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(N8N_WEBHOOK_URL, json=call_data)
@@ -189,10 +192,17 @@ async def cleanup_session(sid: str):
     
     try:
         conversation_text = "\n".join(session["conversation"])
+        
+        # Make sure we have the caller number
+        caller_number = session.get("caller_number", "Unknown")
+        caller_name = session.get("caller_name", "")
+        
+        logger.info(f"Session cleanup - Caller: {caller_name}, Number: {caller_number}")
+        
         summary = extract_call_summary(
             conversation_text,
-            session.get("caller_name", ""), 
-            session.get("caller_number", "Unknown"),
+            caller_name, 
+            caller_number,
         )
         
         summary.update({
@@ -231,8 +241,10 @@ async def incoming_call(request: Request):
         
         logger.info(f"Incoming call from {caller}, CallSid: {call_sid}")
         
+        # Store caller number immediately
         if call_sid and caller != "Unknown":
             CALLER_NUMBERS[call_sid] = caller
+            logger.info(f"Stored caller number: {call_sid} -> {caller}")
         
         # Use the actual hostname from the request
         host = request.headers.get("host", request.url.hostname)
@@ -274,7 +286,7 @@ async def media_stream(websocket: WebSocket):
         "openai_ws": None
     }
 
-    # Initialize session
+    # Initialize session with better caller number handling
     ACTIVE_SESSIONS[session_id] = {
         "conversation": [], 
         "caller_name": "", 
@@ -305,7 +317,7 @@ async def media_stream(websocket: WebSocket):
         shared_state["openai_ws"] = openai_ws
         logger.info(f"OpenAI connection established for session {session_id}")
         
-        # Configure OpenAI session
+        # Configure OpenAI session with lower temperature for less verbose responses
         await openai_ws.send(json.dumps({
             "type": "session.update",
             "session": {
@@ -315,8 +327,9 @@ async def media_stream(websocket: WebSocket):
                 "voice": VOICE,
                 "instructions": SYSTEM_MESSAGE,
                 "modalities": ["text", "audio"],
-                "temperature": 0.7,
+                "temperature": 0.4,  # Lower temperature for more concise responses
                 "input_audio_transcription": {"model": "whisper-1"},
+                "max_response_output_tokens": 150,  # Limit response length
             }
         }))
 
@@ -329,7 +342,7 @@ async def media_stream(websocket: WebSocket):
                     "item": {
                         "type": "message", 
                         "role": "user",
-                        "content": [{"type": "input_text", "text": "Please greet the caller as instructed."}],
+                        "content": [{"type": "input_text", "text": "Please greet the caller briefly as instructed."}],
                     },
                 }))
                 await openai_ws.send(json.dumps({"type": "response.create"}))
@@ -355,14 +368,17 @@ async def media_stream(websocket: WebSocket):
                         if event == "start":
                             shared_state["stream_sid"] = data["start"]["streamSid"]
                             shared_state["call_sid"] = data["start"].get("callSid")
+                            
+                            # Get caller number from stored data
                             caller = CALLER_NUMBERS.get(shared_state["call_sid"], "Unknown")
                             
+                            # Update session with caller info
                             ACTIVE_SESSIONS[session_id].update({
                                 "call_sid": shared_state["call_sid"],
                                 "caller_number": caller
                             })
                             
-                            logger.info(f"Stream started - StreamSid: {shared_state['stream_sid']}, CallSid: {shared_state['call_sid']}")
+                            logger.info(f"Stream started - StreamSid: {shared_state['stream_sid']}, CallSid: {shared_state['call_sid']}, Caller: {caller}")
                             
                             # Small delay then send greeting
                             await asyncio.sleep(1.0)
@@ -422,13 +438,23 @@ async def media_stream(websocket: WebSocket):
                             ACTIVE_SESSIONS[session_id]["conversation"].append(f"Caller: {transcript}")
                             logger.info(f"Session {session_id} - Caller: {transcript}")
 
-                            # Extract caller name
+                            # Extract caller name with better patterns
                             if not ACTIVE_SESSIONS[session_id]["caller_name"]:
-                                name_match = re.search(r"(?:i'm|i am|my name is|this is|it's)\s+([a-zA-Z]+)", transcript.lower())
-                                if name_match:
-                                    name = name_match.group(1).title()
-                                    ACTIVE_SESSIONS[session_id]["caller_name"] = name
-                                    logger.info(f"Extracted caller name: {name}")
+                                name_patterns = [
+                                    r"(?:i'm|i am|my name is|this is|it's|call me)\s+([a-zA-Z]+)",
+                                    r"^([a-zA-Z]+)\s+(?:here|speaking|calling)",
+                                    r"(?:^|\s)([A-Z][a-z]+)(?:\s|$)"  # Capitalized names
+                                ]
+                                
+                                for pattern in name_patterns:
+                                    name_match = re.search(pattern, transcript, re.IGNORECASE)
+                                    if name_match:
+                                        name = name_match.group(1).title()
+                                        # Skip common words that aren't names
+                                        if name.lower() not in ['yes', 'no', 'hello', 'hi', 'thanks', 'thank', 'good', 'fine', 'well']:
+                                            ACTIVE_SESSIONS[session_id]["caller_name"] = name
+                                            logger.info(f"Extracted caller name: {name}")
+                                            break
 
                         elif response_type == "response.audio_transcript.done":
                             transcript = response.get("transcript", "")
