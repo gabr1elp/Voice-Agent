@@ -34,28 +34,29 @@ MAX_CALL_DURATION = int(os.getenv('MAX_CALL_DURATION', 300))  # 5 minutes defaul
 # ------------------
 #  VAD configuration
 # ------------------
-VAD_MODE = 2  # 0‑3, higher is more aggressive at filtering noise
+VAD_MODE = 2  # 0-3, higher is more aggressive at filtering noise
 VAD = webrtcvad.Vad(VAD_MODE)
-SAMPLE_RATE = 8000  # Twilio streams μ‑law 8 kHz
+SAMPLE_RATE = 8000  # Twilio streams μ-law 8 kHz
 FRAME_MS = 20       # Twilio sends 20 ms frames
 
 
 def is_voiced(ulaw_bytes: bytes) -> bool:
     """Return True if the audio frame contains speech."""
     try:
-        pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)  # convert to 16‑bit linear PCM
+        pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)  # convert to 16-bit linear PCM
         return VAD.is_speech(pcm16, SAMPLE_RATE)
     except Exception:
         return False
 
-# Sales‑focused system message for Zapstrix
+
+# Sales-focused system message for Zapstrix
 SYSTEM_MESSAGE = (
     "You are a professional sales representative for Zapstrix. Your role is to:\n"
     "1. Warmly greet callers and introduce yourself as representing Zapstrix.\n"
     "2. Listen to their needs and inquiries about our services.\n"
     "3. Provide helpful information about what Zapstrix offers.\n"
     "   Zapstrix is an AI Agent and Automation company that specializes in building custom solutions for businesses of all sizes.\n"
-    "   We focus on delivering high‑quality, scalable, and secure solutions tailored to meet the unique needs of our clients,\n"
+    "   We focus on delivering high-quality, scalable, and secure solutions tailored to meet the unique needs of our clients,\n"
     "   improving lead generation, customer support, and operational efficiency.\n"
     "4. Build rapport and trust through professional, friendly conversation.\n"
     "5. Ask for the caller's name naturally during the conversation.\n"
@@ -73,28 +74,31 @@ CALLER_NUMBERS = {}
 # Graceful shutdown handling
 shutdown_event = asyncio.Event()
 
+
 def signal_handler(signum, frame):
     shutdown_event.set()
+
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+
 @asynccontextmanager
-after = lifespan
 async def lifespan(app: FastAPI):
+    """Cleanup active sessions on shutdown."""
     yield
-    # Cleanup active sessions on shutdown
     for session_id in list(ACTIVE_SESSIONS.keys()):
         try:
             await cleanup_session(session_id)
         except Exception as e:
             logger.error(f"Error cleaning up session {session_id}: {e}")
 
+
 app = FastAPI(
     title="Zapstrix Assistant",
-    description="AI‑powered assistant for Zapstrix",
+    description="AI-powered assistant for Zapstrix",
     version="1.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # Add CORS middleware for production
@@ -110,6 +114,7 @@ app.add_middleware(
 #  Helper / utility funcs
 # ------------------------
 
+
 def extract_call_summary(conversation_text: str, caller_name: str = "", caller_number: str = "") -> dict:
     """Extract call information using OpenAI API with proper error handling"""
     if not conversation_text.strip():
@@ -124,9 +129,23 @@ def extract_call_summary(conversation_text: str, caller_name: str = "", caller_n
 
     try:
         import openai
+
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-        prompt = f"""Analyze this sales call conversation and extract key information.\n\nConversation:\n{conversation_text}\n\nReturn ONLY valid JSON with these exact keys:\n- \"caller_name\": The caller's name (use \"{caller_name}\" if provided, otherwise extract from conversation)\n- \"caller_number\": \"{caller_number}\"\n- \"call_summary\": Brief summary of the call (2‑3 sentences)\n- \"call_duration\": Estimate in minutes\n- \"key_topics\": Array of main topics discussed\n- \"follow_up_needed\": Boolean indicating if follow‑up is recommended\n\nJSON:"""
+        prompt = f"""Analyze this sales call conversation and extract key information.
+
+Conversation:
+{conversation_text}
+
+Return ONLY valid JSON with these exact keys:
+- "caller_name": The caller's name (use "{caller_name}" if provided, otherwise extract from conversation)
+- "caller_number": "{caller_number}"
+- "call_summary": Brief summary of the call (2-3 sentences)
+- "call_duration": Estimate in minutes
+- "key_topics": Array of main topics discussed
+- "follow_up_needed": Boolean indicating if follow-up is recommended
+
+JSON:"""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -215,6 +234,7 @@ async def cleanup_session(session_id: str):
 # ---------------
 #     ROUTES
 # ---------------
+
 
 @app.get("/", response_class=JSONResponse)
 async def index_page():
@@ -344,7 +364,7 @@ async def handle_media_stream(websocket: WebSocket):
                         ):
                             transcript = response.get("transcript", "")
                             confidence = response.get("confidence", 1.0)
-                            # Ignore low‑confidence or super‑short noise transcripts
+                            # Ignore low-confidence or super-short noise transcripts
                             if confidence < 0.6 or len(transcript.split()) < 3:
                                 continue
                             ACTIVE_SESSIONS[session_id]["conversation"].append(
