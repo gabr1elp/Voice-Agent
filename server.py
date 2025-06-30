@@ -45,15 +45,12 @@ PORT            = int(os.getenv('PORT', 5024))
 VOICE           = os.getenv('VOICE', 'sage')
 MAX_CALL_DURATION = int(os.getenv('MAX_CALL_DURATION', 300))  # seconds
 
-# Updated system message to be more concise
 SYSTEM_MESSAGE = (
-    "You are a professional sales representative for Pascual & Co. Be concise and direct:\n"
-    "1. Greet callers briefly: 'Hi, this is [Your Name] from Pascual & Co. Who am I speaking with?'\n"
-    "2. Listen to their needs and explain services in 1-2 sentences max.\n" 
-    "3. Ask direct questions. Keep responses under 20 words when possible.\n"
-    "4. Avoid lengthy explanations unless specifically asked.\n"
-    "5. Focus on next steps and actionable items.\n"
-    "Keep all responses brief, professional, and to the point."
+    "You are a professional sales representative for Pascual & Co. Your role is to:\n"
+    "1. Warmly greet callers and introduce yourself.\n"
+    "2. Listen to their needs and explain Pascual & Co's services.\n" 
+    "3. Build rapport, handle objections, stay helpful.\n"
+    'Start with: "Hello! Thank you for calling Pascual & Co. I\'m here to help you today. May I ask who I\'m speaking with?"'
 )
 
 # ---------------- helpers ----------------
@@ -98,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Pascual & Co Assistant",
     description="AI-powered assistant for Pascual & Co",
-    version="1.0.3",
+    version="1.0.2",
     lifespan=lifespan,
 )
 
@@ -177,7 +174,7 @@ async def send_to_n8n(call_data: dict):
         timeout = httpx.Timeout(15.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(N8N_WEBHOOK_URL, json=call_data)
-            logger.info(f"Sent call data to n8n: {response.status_code} - Data: {json.dumps(call_data, indent=2)}")
+            logger.info(f"Sent call data to n8n: {response.status_code}")
             return True
     except Exception as e:
         logger.error(f"Failed to send data to n8n: {e}")
@@ -192,19 +189,11 @@ async def cleanup_session(sid: str):
     
     try:
         conversation_text = "\n".join(session["conversation"])
-        
-        # Ensure we have the caller number
-        caller_number = session.get("caller_number", "Unknown")
-        logger.info(f"Session {sid} cleanup - Caller number: {caller_number}")
-        
         summary = extract_call_summary(
             conversation_text,
             session.get("caller_name", ""), 
-            caller_number,
+            session.get("caller_number", "Unknown"),
         )
-        
-        # Force the caller number to be included
-        summary["caller_number"] = caller_number
         
         summary.update({
             "timestamp": dt.datetime.utcnow().isoformat(),
@@ -214,8 +203,6 @@ async def cleanup_session(sid: str):
             "company": "Pascual & Co", 
             "call_type": "inbound_sales",
         })
-        
-        logger.info(f"Final summary for session {sid}: {json.dumps(summary, indent=2)}")
         
         # Send to n8n with timeout
         await asyncio.wait_for(send_to_n8n(summary), timeout=10)
@@ -244,10 +231,8 @@ async def incoming_call(request: Request):
         
         logger.info(f"Incoming call from {caller}, CallSid: {call_sid}")
         
-        # Store caller number immediately
         if call_sid and caller != "Unknown":
             CALLER_NUMBERS[call_sid] = caller
-            logger.info(f"Stored caller number {caller} for CallSid {call_sid}")
         
         # Use the actual hostname from the request
         host = request.headers.get("host", request.url.hostname)
@@ -293,7 +278,7 @@ async def media_stream(websocket: WebSocket):
     ACTIVE_SESSIONS[session_id] = {
         "conversation": [], 
         "caller_name": "", 
-        "caller_number": "Unknown",
+        "caller_number": CALLER_NUMBERS,
         "call_sid": None, 
         "start_time": start_time, 
         "last_activity": time.time(),
@@ -320,7 +305,7 @@ async def media_stream(websocket: WebSocket):
         shared_state["openai_ws"] = openai_ws
         logger.info(f"OpenAI connection established for session {session_id}")
         
-        # Configure OpenAI session with emphasis on being concise
+        # Configure OpenAI session
         await openai_ws.send(json.dumps({
             "type": "session.update",
             "session": {
@@ -330,7 +315,7 @@ async def media_stream(websocket: WebSocket):
                 "voice": VOICE,
                 "instructions": SYSTEM_MESSAGE,
                 "modalities": ["text", "audio"],
-                "temperature": 0.4,  # Slightly lower for more consistent responses
+                "temperature": 0.4,
                 "input_audio_transcription": {"model": "whisper-1"},
             }
         }))
@@ -344,7 +329,7 @@ async def media_stream(websocket: WebSocket):
                     "item": {
                         "type": "message", 
                         "role": "user",
-                        "content": [{"type": "input_text", "text": "Please give a brief greeting as instructed - keep it under 15 words."}],
+                        "content": [{"type": "input_text", "text": "Please greet the caller as instructed."}],
                     },
                 }))
                 await openai_ws.send(json.dumps({"type": "response.create"}))
@@ -370,17 +355,14 @@ async def media_stream(websocket: WebSocket):
                         if event == "start":
                             shared_state["stream_sid"] = data["start"]["streamSid"]
                             shared_state["call_sid"] = data["start"].get("callSid")
-                            
-                            # Get caller number from stored data
                             caller = CALLER_NUMBERS.get(shared_state["call_sid"], "Unknown")
                             
-                            # Update session with caller info
                             ACTIVE_SESSIONS[session_id].update({
                                 "call_sid": shared_state["call_sid"],
                                 "caller_number": caller
                             })
                             
-                            logger.info(f"Stream started - StreamSid: {shared_state['stream_sid']}, CallSid: {shared_state['call_sid']}, Caller: {caller}")
+                            logger.info(f"Stream started - StreamSid: {shared_state['stream_sid']}, CallSid: {shared_state['call_sid']}")
                             
                             # Small delay then send greeting
                             await asyncio.sleep(1.0)
