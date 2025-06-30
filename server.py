@@ -278,7 +278,7 @@ async def media_stream(websocket: WebSocket):
     ACTIVE_SESSIONS[session_id] = {
         "conversation": [], 
         "caller_name": "", 
-        "caller_number": CALLER_NUMBERS,
+        "caller_number": "Unknown",
         "call_sid": None, 
         "start_time": start_time, 
         "last_activity": time.time(),
