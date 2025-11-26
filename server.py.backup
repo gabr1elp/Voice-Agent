@@ -11,12 +11,8 @@ import sys
 
 load_dotenv()
 
-# Enhanced logging for debugging
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Minimal logging - only critical system errors
+logging.basicConfig(level=logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
 # Configuration with validation
@@ -33,7 +29,6 @@ N8N_WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 5024))
 VOICE = os.getenv('VOICE', 'sage')
 MAX_CALL_DURATION = int(os.getenv('MAX_CALL_DURATION', 300))  # 5 minutes default
-OPENAI_PROMPT_ID = 'pmpt_69261f1c1acc81949acd6622b6db3400000e98d0853c26af'
 
 # Sales-focused system message for Pascual & Co
 SYSTEM_MESSAGE = """You are a professional sales representative for Zapstrix Your role is to:
@@ -259,16 +254,13 @@ async def handle_incoming_call(request: Request):
         
         # Generate TwiML response
         response = VoiceResponse()
-
-        # Get the host from the request - Twilio sends it correctly
-        host = request.headers.get('host') or request.url.netloc
-        stream_url = f'wss://{host}/media-stream'
-        logger.info(f"Configuring Media Stream URL: {stream_url} (from host: {host})")
-
+        host = request.url.hostname
+        
         connect = Connect()
+        stream_url = f'wss://{host}/media-stream'
         connect.stream(url=stream_url)
         response.append(connect)
-
+        
         return HTMLResponse(content=str(response), media_type="application/xml")
         
     except Exception as e:
@@ -284,19 +276,17 @@ async def handle_media_stream(websocket: WebSocket):
     call_start_time = time.time()
     
     await websocket.accept()
-    logger.info(f"WebSocket connection accepted for session {session_id}")
-
+    
     try:
-        logger.info("Connecting to OpenAI Realtime API (stable)...")
         async with websockets.connect(
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+    "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
     extra_headers={
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1"
     },
     ping_interval=30,
     ping_timeout=10
 ) as openai_ws:
-            logger.info("Connected to OpenAI Realtime API successfully")
 
             
             # Initialize session
@@ -432,14 +422,7 @@ async def handle_media_stream(websocket: WebSocket):
                         if response['type'] == 'response.audio.delta' and response.get('delta'):
                             if stream_sid:
                                 try:
-                                    # OpenAI sends base64-encoded audio - pass through directly
-                                    audio_payload = response['delta']
-
-                                    # Debug: Log first audio packet
-                                    if not hasattr(send_to_twilio, 'first_packet_logged'):
-                                        logger.info(f"First audio packet - Length: {len(audio_payload)}, Preview: {audio_payload[:50]}...")
-                                        send_to_twilio.first_packet_logged = True
-
+                                    audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
                                     audio_delta = {
                                         "event": "media",
                                         "streamSid": stream_sid,
@@ -447,8 +430,7 @@ async def handle_media_stream(websocket: WebSocket):
                                     }
                                     await websocket.send_json(audio_delta)
                                 except Exception as e:
-                                    logger.warning(f"Failed to send audio delta: {type(e).__name__}: {str(e)}")
-                                    # Continue processing - don't let one error kill the stream
+                                    pass  # Continue processing audio
                                     
                 except Exception as e:
                     pass  # Continue processing
@@ -480,15 +462,14 @@ async def send_session_update(openai_ws):
         "session": {
             "turn_detection": {"type": "server_vad"},
             "input_audio_format": "g711_ulaw",
-            "output_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw", 
             "voice": VOICE,
-            "instructions": OPENAI_PROMPT_ID,  # Use prompt ID from OpenAI platform
+            "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
             "temperature": 0.4,
             "input_audio_transcription": {"model": "whisper-1"}
         }
     }
-    logger.info(f"Configuring OpenAI session - Audio: g711_ulaw, Voice: {VOICE}, Prompt: {OPENAI_PROMPT_ID}")
     await openai_ws.send(json.dumps(session_update))
 
 @app.get("/health")
