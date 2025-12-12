@@ -254,10 +254,12 @@ async def voice(
         # Meeting is off-track -> Elmo interrupts
         print("[Elmo] INTERRUPTING - conversation is off track")
 
-        # Clear conversation history after intervention to allow fresh start
-        # This prevents the AI from continuously seeing old off-topic context
-        conversation_history[CallSid] = []
-        print("[Elmo] Cleared conversation history to allow fresh analysis after intervention")
+        # Keep only the first message to preserve meeting topic context
+        # This allows the AI to remember what the meeting is about while
+        # discarding ALL off-topic discussion (including the message that triggered this)
+        if len(conversation_history[CallSid]) > 1:
+            conversation_history[CallSid] = conversation_history[CallSid][:1]
+            print("[Elmo] Reset conversation history to initial topic context")
 
         twiml = f"""
 <Response>
