@@ -367,7 +367,7 @@ async def media_stream(websocket: WebSocket):
             # Using gpt-4o-mini-realtime-preview for 60% cost savings
             f"wss://api.openai.com/v1/realtime?"
             f"model=gpt-4o-mini-realtime-preview&temperature={TEMPERATURE}",
-            additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            extra_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             ping_interval=30,
             ping_timeout=10,
         ) as openai_ws:
@@ -461,18 +461,20 @@ async def initialize_session(openai_ws):
     session_update = {
         "type": "session.update",
         "session": {
-            "modalities": ["text", "audio"],
-            "instructions": VOICE_SYSTEM_PROMPT,
-            "voice": VOICE,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 200
+            "type": "realtime",
+            "model": "gpt-4o-mini-realtime-preview",
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "turn_detection": {"type": "server_vad"},
+                },
+                "output": {
+                    "format": {"type": "audio/pcmu"},
+                    "voice": VOICE,
+                },
             },
-            "temperature": TEMPERATURE,
+            "instructions": VOICE_SYSTEM_PROMPT,
         },
     }
 
@@ -530,19 +532,12 @@ async def _twilio_to_openai(
             elif event_type == "media":
                 # Twilio sends base64-encoded G.711 μ-law audio
                 # Convert to PCM16 for OpenAI
-                try:
-                    ulaw_audio = base64.b64decode(data["media"]["payload"])
-                    pcm16_audio = ulaw_to_pcm16(ulaw_audio)
-                    pcm16_b64 = base64.b64encode(pcm16_audio).decode("utf-8")
-
+                if openai_ws.open:
                     audio_append = {
                         "type": "input_audio_buffer.append",
-                        "audio": pcm16_b64,
+                        "audio": data["media"]["payload"],
                     }
                     await openai_ws.send(json.dumps(audio_append))
-                except Exception as e:
-                    logger.debug(f"Error sending audio to OpenAI: {e}")
-                    break
 
             elif event_type == "stop":
                 logger.info("Twilio stream stopped")
@@ -592,9 +587,10 @@ async def _openai_to_twilio(
                 try:
                     # OpenAI sends base64-encoded PCM16 audio
                     # Convert to μ-law for Twilio
-                    pcm16_audio = base64.b64decode(response["delta"])
-                    ulaw_audio = pcm16_to_ulaw(pcm16_audio)
-                    audio_payload = base64.b64encode(ulaw_audio).decode("utf-8")
+                    decoded = base64.b64decode(response["delta"])
+                    pcm16_audio = decoded
+                    ulaw_audio = decoded
+                    audio_payload = base64.b64encode(decoded).decode("utf-8")
 
                     if first_audio:
                         logger.info(
