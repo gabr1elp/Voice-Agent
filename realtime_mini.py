@@ -460,25 +460,21 @@ async def initialize_session(openai_ws):
     session_update = {
         "type": "session.update",
         "session": {
-            "type": "realtime",
-            "model": "gpt-4o-mini-realtime-preview",  # Mini model
-            # Only need audio back from the model; text is optional
-            "output_modalities": ["audio", "text"],
-            "input_audio_transcription": {"model": "whisper-1"},
-            "audio": {
-                "input": {
-                    # Twilio sends G.711 μ-law as base64-encoded bytes
-                    "format": {"type": "audio/pcmu"},
-                    "turn_detection": {"type": "server_vad"},
-                },
-                "output": {
-                    "format": {"type": "audio/pcmu"},
-                    "voice": VOICE,
-                },
-            },
-            # IMPORTANT: this must be the FULL text of your system prompt,
-            # not a pmpt_ ID.
+            "modalities": ["text", "audio"],
             "instructions": VOICE_SYSTEM_PROMPT,
+            "voice": VOICE,
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
+            "input_audio_transcription": {
+                "model": "whisper-1"
+            },
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 200
+            },
+            "temperature": TEMPERATURE,
         },
     }
 
