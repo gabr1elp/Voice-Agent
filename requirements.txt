@@ -3,3 +3,7 @@ uvicorn[standard]
 python-dotenv
 openai
 python-multipart
+websockets
+twilio
+gspread
+oauth2client

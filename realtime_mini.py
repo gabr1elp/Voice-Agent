@@ -5,6 +5,7 @@ import uuid
 import base64
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
@@ -13,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import websockets
 from dotenv import load_dotenv
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ============================================================
 #  Load env + config
@@ -26,25 +29,47 @@ VOICE = os.getenv("VOICE", "sage")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.8"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 
+# Google Sheets configuration
+GOOGLE_SHEETS_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON")  # JSON string of service account credentials
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Voice Agent Call Logs")
+
 # Either put your full system prompt in the env var...
 VOICE_SYSTEM_PROMPT = os.getenv("VOICE_SYSTEM_PROMPT")
 
 # ...or paste it directly here as a fallback:
 if not VOICE_SYSTEM_PROMPT:
     VOICE_SYSTEM_PROMPT = """
-You are the Zapstrix Voice Agent.
+You are Gabriel Pascual's personal AI voice assistant.
 
-answer any questions the user asks to the best of your abilities.
+Gabriel is a Data/AI Analyst at Accenture in Tampa, FL, with a background in mechanical engineering from the University of Florida (EIT).
+He specializes in building AI-driven solutions, hierarchical agent architectures, and full-stack applications using technologies like Azure AI Foundry,
+FastAPI, React, Python, and OpenAI APIs. He has experience in automation, workflow optimization, and reducing operational overhead through intelligent systems.
+
+Gabriel is also the founder of ShotByPascual, a photography business where he's integrated APIs like Resend for transactional emails and
+deployed sites using Vercel CI/CD pipelines. His interests include photography, salsa dancing, fitness, cooking, and financial literacy.
+
+CORE RESPONSIBILITIES:
+- Act as Gabriel's professional representative when he's unavailable
+- Screen and route calls based on urgency and context
+- Answer questions about Gabriel's background, skills, and availability
+- Take detailed messages including caller's name, company, phone number, and purpose of call
+- Schedule meetings or calls when appropriate (ask for preferred dates/times)
+- Provide high-level information about Gabriel's work and projects
+
+COMMUNICATION STYLE:
+- Professional, warm, and efficient
+- Speak clearly and concisely
+- Ask clarifying questions when needed
+- Never mention that you're using OpenAI, Twilio, or underlying technical tools
+- If unsure about something, acknowledge it honestly and offer to take a message
+- Always confirm important details like phone numbers, email addresses, and meeting times
+
+BOUNDARIES:
+- Do not share personal contact information without explicit permission
+- For detailed technical discussions, offer to have Gabriel call back
+- For urgent matters, ask for best callback number and timeframe
+- Keep conversations focused and purposeful
 """
-
-
-"""
-- You answer calls from small business owners and their customers.
-- You speak clearly, concisely, and sound like a professional human assistant.
-- You never mention that you are using OpenAI, Twilio, or any underlying tools.
-- You ask clarifying questions when needed and confirm details like dates, times, and names.
-- If the caller is rambling, gently steer the conversation back to the task.
-- Always be polite, calm, and efficient."""
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY is required")
@@ -73,11 +98,15 @@ LOG_EVENT_TYPES = [
 # Track active sessions (mainly for debugging / health)
 ACTIVE_SESSIONS = {}
 
+# Google Sheets client (initialized lazily)
+gsheets_client = None
+call_log_sheet = None
+
 # ============================================================
 #  FastAPI app
 # ============================================================
 
-app = FastAPI(title="Zapstrix Voice Agent (Mini)", version="3.0.1-mini")
+app = FastAPI(title="Gabriel Pascual's Voice Agent", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -88,6 +117,146 @@ app.add_middleware(
 )
 
 # ============================================================
+#  Google Sheets Setup
+# ============================================================
+
+
+def init_google_sheets():
+    """
+    Initialize Google Sheets client and get the call log sheet.
+    Returns the worksheet object or None if initialization fails.
+    """
+    global gsheets_client, call_log_sheet
+
+    if call_log_sheet is not None:
+        return call_log_sheet
+
+    if not GOOGLE_SHEETS_CREDS_JSON:
+        logger.warning("GOOGLE_SHEETS_CREDS_JSON not set - call logging to Google Sheets disabled")
+        return None
+
+    try:
+        # Parse credentials from environment variable (JSON string)
+        creds_dict = json.loads(GOOGLE_SHEETS_CREDS_JSON)
+
+        # Set up credentials
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        gsheets_client = gspread.authorize(creds)
+
+        # Open or create the spreadsheet
+        try:
+            spreadsheet = gsheets_client.open(GOOGLE_SHEET_NAME)
+            logger.info(f"Opened existing Google Sheet: {GOOGLE_SHEET_NAME}")
+        except gspread.SpreadsheetNotFound:
+            spreadsheet = gsheets_client.create(GOOGLE_SHEET_NAME)
+            logger.info(f"Created new Google Sheet: {GOOGLE_SHEET_NAME}")
+
+        # Get or create the worksheet
+        try:
+            call_log_sheet = spreadsheet.worksheet("Call Logs")
+        except gspread.WorksheetNotFound:
+            call_log_sheet = spreadsheet.add_worksheet(title="Call Logs", rows="1000", cols="8")
+            # Add headers
+            call_log_sheet.append_row([
+                "Timestamp",
+                "Call SID",
+                "From Number",
+                "To Number",
+                "Event Type",
+                "Duration (sec)",
+                "Exchanges",
+                "Summary"
+            ])
+            logger.info("Created Call Logs worksheet with headers")
+
+        logger.info("Google Sheets integration initialized successfully")
+        return call_log_sheet
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid GOOGLE_SHEETS_CREDS_JSON format: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error initializing Google Sheets: {e}")
+        return None
+
+
+# ============================================================
+#  Call Logging Utilities
+# ============================================================
+
+
+def log_call_event(call_sid: str, from_number: str, to_number: str, event_type: str, data: dict = None):
+    """
+    Log call events to Google Sheets for easy access and monitoring.
+    Falls back to console logging if Google Sheets is not configured.
+    """
+    try:
+        sheet = init_google_sheets()
+
+        # Prepare row data
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        duration = ""
+        exchanges = ""
+        summary = ""
+
+        if data:
+            duration = data.get("duration", "")
+            exchanges = data.get("transcript_count", "")
+            summary = data.get("summary", "")
+
+        if sheet is not None:
+            row = [
+                timestamp,
+                call_sid,
+                from_number,
+                to_number,
+                event_type,
+                str(duration),
+                str(exchanges),
+                summary
+            ]
+
+            # Append to sheet
+            sheet.append_row(row)
+            logger.debug(f"Logged call event to Google Sheets: {event_type} for {call_sid}")
+        else:
+            # Fallback: log to console
+            logger.info(f"Call Log: {timestamp} | {event_type} | From: {from_number} | To: {to_number} | Summary: {summary}")
+
+    except Exception as e:
+        logger.error(f"Error logging call event to Google Sheets: {e}")
+        # Fallback to console
+        logger.info(f"Call Log (fallback): {event_type} | From: {from_number} | CallSID: {call_sid}")
+
+
+def generate_call_summary(transcripts: list) -> str:
+    """
+    Generate a simple summary from the conversation transcripts.
+    """
+    if not transcripts:
+        return "No conversation recorded"
+
+    user_messages = [t for t in transcripts if t.get("role") == "user"]
+    ai_messages = [t for t in transcripts if t.get("role") == "assistant"]
+
+    summary = f"Call duration: {len(transcripts)} exchanges. "
+    summary += f"User spoke {len(user_messages)} times. "
+    summary += f"AI responded {len(ai_messages)} times."
+
+    # Add first user message as context
+    if user_messages:
+        first_msg = user_messages[0].get("content", "")
+        if first_msg:
+            summary += f" Initial topic: {first_msg[:100]}"
+
+    return summary
+
+
+# ============================================================
 #  Basic health / index
 # ============================================================
 
@@ -96,7 +265,7 @@ app.add_middleware(
 async def index():
     return {
         "status": "operational",
-        "service": "Zapstrix Voice Agent (Mini)",
+        "service": "Gabriel Pascual's Voice Agent",
         "version": "3.0.1-mini",
         "model": "gpt-4o-mini-realtime-preview",
     }
@@ -124,10 +293,20 @@ async def handle_incoming_call(request: Request):
     We respond with TwiML that opens a Media Stream to /media-stream.
     """
     try:
+        # Parse form data from Twilio
+        form_data = await request.form()
+        caller_number = form_data.get("From", "Unknown")
+        called_number = form_data.get("To", "Unknown")
+        call_sid = form_data.get("CallSid", "Unknown")
+
+        # Log incoming call
+        logger.info(f"Incoming call from {caller_number} to {called_number} (SID: {call_sid})")
+        log_call_event(call_sid, caller_number, called_number, "call_started")
+
         host = request.headers.get("host") or request.url.netloc
         stream_url = f"wss://{host}/media-stream"
 
-        logger.info(f"Incoming call - Media Stream URL: {stream_url}")
+        logger.info(f"Media Stream URL: {stream_url}")
 
         from twilio.twiml.voice_response import VoiceResponse, Connect
 
@@ -170,6 +349,10 @@ async def media_stream(websocket: WebSocket):
     ACTIVE_SESSIONS[session_id] = {
         "start_time": time.time(),
         "stream_sid": None,
+        "from_number": "Unknown",
+        "to_number": "Unknown",
+        "call_sid": "Unknown",
+        "transcripts": [],
     }
 
     try:
@@ -196,6 +379,43 @@ async def media_stream(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error in /media-stream handler: {e}")
     finally:
+        # Log call summary before cleanup
+        session_data = ACTIVE_SESSIONS.get(session_id, {})
+        transcripts = session_data.get("transcripts", [])
+        call_sid = session_data.get("call_sid", "Unknown")
+        from_number = session_data.get("from_number", "Unknown")
+        to_number = session_data.get("to_number", "Unknown")
+
+        # Calculate call duration
+        start_time = session_data.get("start_time", time.time())
+        duration = int(time.time() - start_time)
+
+        if transcripts:
+            summary = generate_call_summary(transcripts)
+            logger.info(f"Call summary: {summary}")
+            log_call_event(
+                call_sid=call_sid,
+                from_number=from_number,
+                to_number=to_number,
+                event_type="call_ended",
+                data={
+                    "summary": summary,
+                    "transcript_count": len(transcripts),
+                    "duration": duration
+                }
+            )
+        else:
+            log_call_event(
+                call_sid=call_sid,
+                from_number=from_number,
+                to_number=to_number,
+                event_type="call_ended",
+                data={
+                    "summary": "No conversation recorded",
+                    "duration": duration
+                }
+            )
+
         ACTIVE_SESSIONS.pop(session_id, None)
         logger.info(f"Session ended: {session_id}")
 
@@ -284,8 +504,15 @@ async def _twilio_to_openai(
 
             if event_type == "start":
                 stream_sid = data["start"]["streamSid"]
+                call_sid = data["start"].get("callSid", "Unknown")
+                custom_params = data["start"].get("customParameters", {})
+
                 ACTIVE_SESSIONS[session_id]["stream_sid"] = stream_sid
-                logger.info(f"Twilio stream started - SID: {stream_sid}")
+                ACTIVE_SESSIONS[session_id]["call_sid"] = call_sid
+                ACTIVE_SESSIONS[session_id]["from_number"] = custom_params.get("from_number", "Unknown")
+                ACTIVE_SESSIONS[session_id]["to_number"] = custom_params.get("to_number", "Unknown")
+
+                logger.info(f"Twilio stream started - SID: {stream_sid}, CallSID: {call_sid}")
 
             elif event_type == "media":
                 # Twilio sends base64-encoded G.711 μ-law audio in data['media']['payload']
@@ -372,12 +599,24 @@ async def _openai_to_twilio(
                 transcript = response.get("transcript") or ""
                 if transcript:
                     logger.info(f"AI said: {transcript}")
+                    # Store in session for summary
+                    if session_id in ACTIVE_SESSIONS:
+                        ACTIVE_SESSIONS[session_id]["transcripts"].append({
+                            "role": "assistant",
+                            "content": transcript
+                        })
 
             # User speech transcript
             elif event_type == "conversation.item.input_audio_transcription.completed":
                 transcript = response.get("transcript") or ""
                 if transcript:
                     logger.info(f"User said: {transcript}")
+                    # Store in session for summary
+                    if session_id in ACTIVE_SESSIONS:
+                        ACTIVE_SESSIONS[session_id]["transcripts"].append({
+                            "role": "user",
+                            "content": transcript
+                        })
 
             # Errors
             elif event_type == "error":
@@ -396,6 +635,6 @@ async def _openai_to_twilio(
 if __name__ == "__main__":
     import uvicorn
 
-    logger.info(f"Starting Zapstrix Voice Agent (MINI) on port {PORT}")
+    logger.info(f"Starting Gabriel Pascual's Voice Agent on port {PORT}")
     logger.info("Using model: gpt-4o-mini-realtime-preview (60% cost savings)")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
