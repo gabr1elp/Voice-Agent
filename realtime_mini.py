@@ -387,59 +387,59 @@ async def media_stream(websocket: WebSocket):
                 _openai_to_twilio(websocket, openai_ws, session_id),
             )
 
+            # IMPORTANT: Do cleanup immediately after gather completes
+            # Don't wait for finally block (FastAPI may cancel the task)
+            try:
+                logger.info(f"📞 Call completed, starting cleanup for session: {session_id}")
+                session_data = ACTIVE_SESSIONS.get(session_id, {})
+                transcripts = session_data.get("transcripts", [])
+                call_sid = session_data.get("call_sid", "Unknown")
+                from_number = session_data.get("from_number", "Unknown")
+                to_number = session_data.get("to_number", "Unknown")
+
+                logger.info(f"Found {len(transcripts)} transcripts for session {session_id}")
+
+                # Calculate call duration
+                start_time = session_data.get("start_time", time.time())
+                duration = int(time.time() - start_time)
+
+                if transcripts:
+                    summary = generate_call_summary(transcripts)
+                    logger.info(f"Call summary: {summary}")
+                    log_call_event(
+                        call_sid=call_sid,
+                        from_number=from_number,
+                        to_number=to_number,
+                        event_type="call_ended",
+                        data={
+                            "summary": summary,
+                            "transcript_count": len(transcripts),
+                            "duration": duration
+                        }
+                    )
+                else:
+                    logger.info("No transcripts found, logging with default summary")
+                    log_call_event(
+                        call_sid=call_sid,
+                        from_number=from_number,
+                        to_number=to_number,
+                        event_type="call_ended",
+                        data={
+                            "summary": "No conversation recorded",
+                            "duration": duration,
+                            "transcript_count": 0
+                        }
+                    )
+
+                ACTIVE_SESSIONS.pop(session_id, None)
+                logger.info(f"✅ Session cleanup complete: {session_id}")
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup: {cleanup_error}")
+
     except WebSocketDisconnect:
         logger.info("Twilio WebSocket disconnected normally")
     except Exception as e:
         logger.error(f"Error in /media-stream handler: {e}")
-    finally:
-        # Log call summary before cleanup
-        logger.info(f"🧹 FINALLY BLOCK ENTERED for session: {session_id}")
-        try:
-            logger.info(f"Starting cleanup for session: {session_id}")
-            session_data = ACTIVE_SESSIONS.get(session_id, {})
-            transcripts = session_data.get("transcripts", [])
-            call_sid = session_data.get("call_sid", "Unknown")
-            from_number = session_data.get("from_number", "Unknown")
-            to_number = session_data.get("to_number", "Unknown")
-
-            logger.info(f"Found {len(transcripts)} transcripts for session {session_id}")
-
-            # Calculate call duration
-            start_time = session_data.get("start_time", time.time())
-            duration = int(time.time() - start_time)
-
-            if transcripts:
-                summary = generate_call_summary(transcripts)
-                logger.info(f"Call summary: {summary}")
-                log_call_event(
-                    call_sid=call_sid,
-                    from_number=from_number,
-                    to_number=to_number,
-                    event_type="call_ended",
-                    data={
-                        "summary": summary,
-                        "transcript_count": len(transcripts),
-                        "duration": duration
-                    }
-                )
-            else:
-                logger.info("No transcripts found, logging with default summary")
-                log_call_event(
-                    call_sid=call_sid,
-                    from_number=from_number,
-                    to_number=to_number,
-                    event_type="call_ended",
-                    data={
-                        "summary": "No conversation recorded",
-                        "duration": duration,
-                        "transcript_count": 0
-                    }
-                )
-
-            ACTIVE_SESSIONS.pop(session_id, None)
-            logger.info(f"Session ended: {session_id}")
-        except Exception as cleanup_error:
-            logger.error(f"Error during cleanup: {cleanup_error}")
 
 
 # ============================================================
