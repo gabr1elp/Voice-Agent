@@ -147,13 +147,15 @@ def init_google_sheets():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         gsheets_client = gspread.authorize(creds)
 
-        # Open or create the spreadsheet
+        # Open the spreadsheet (must be created manually and shared with service account)
         try:
             spreadsheet = gsheets_client.open(GOOGLE_SHEET_NAME)
             logger.info(f"Opened existing Google Sheet: {GOOGLE_SHEET_NAME}")
         except gspread.SpreadsheetNotFound:
-            spreadsheet = gsheets_client.create(GOOGLE_SHEET_NAME)
-            logger.info(f"Created new Google Sheet: {GOOGLE_SHEET_NAME}")
+            logger.error(f"Google Sheet '{GOOGLE_SHEET_NAME}' not found!")
+            logger.error("Please create the sheet manually and share it with the service account email.")
+            logger.error(f"Service account email: {creds_dict.get('client_email', 'N/A')}")
+            return None
 
         # Get or create the worksheet
         try:
@@ -181,6 +183,9 @@ def init_google_sheets():
         return None
     except Exception as e:
         logger.error(f"Error initializing Google Sheets: {e}")
+        if "storage quota" in str(e).lower() or "403" in str(e):
+            logger.error("⚠️ Google Drive storage quota exceeded. Please free up space or use a different account.")
+            logger.error("📝 Call logging will fall back to console logs only.")
         return None
 
 
