@@ -366,7 +366,7 @@ async def media_stream(websocket: WebSocket):
             # Using gpt-4o-mini-realtime-preview for 60% cost savings
             f"wss://api.openai.com/v1/realtime?"
             f"model=gpt-4o-mini-realtime-preview&temperature={TEMPERATURE}",
-            extra_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             ping_interval=30,
             ping_timeout=10,
         ) as openai_ws:
