@@ -5,6 +5,7 @@ import uuid
 import base64
 import asyncio
 import logging
+import audioop
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, Request
@@ -454,8 +455,8 @@ async def send_initial_conversation_item(openai_ws):
 
 async def initialize_session(openai_ws):
     """
-    Configure the Realtime session using the latest API shape.
-    We use audio/pcmu (G.711 μ-law) to match Twilio Media Streams.
+    Configure the Realtime session using PCM16 format.
+    We convert between Twilio's μ-law and OpenAI's PCM16.
     """
     session_update = {
         "type": "session.update",
@@ -463,8 +464,8 @@ async def initialize_session(openai_ws):
             "modalities": ["text", "audio"],
             "instructions": VOICE_SYSTEM_PROMPT,
             "voice": VOICE,
-            "input_audio_format": "g711_ulaw",
-            "output_audio_format": "g711_ulaw",
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
             "turn_detection": {
                 "type": "server_vad",
                 "threshold": 0.5,
@@ -482,6 +483,19 @@ async def initialize_session(openai_ws):
 
     # Make the AI speak first
     await send_initial_conversation_item(openai_ws)
+
+
+# ============================================================
+#  Audio Conversion Helpers
+# ============================================================
+
+def ulaw_to_pcm16(ulaw_data: bytes) -> bytes:
+    """Convert G.711 μ-law audio to 16-bit PCM."""
+    return audioop.ulaw2lin(ulaw_data, 2)  # 2 = 16-bit samples
+
+def pcm16_to_ulaw(pcm_data: bytes) -> bytes:
+    """Convert 16-bit PCM audio to G.711 μ-law."""
+    return audioop.lin2ulaw(pcm_data, 2)  # 2 = 16-bit samples
 
 
 # ============================================================
@@ -514,11 +528,16 @@ async def _twilio_to_openai(
                 logger.info(f"Twilio stream started - SID: {stream_sid}, CallSID: {call_sid}")
 
             elif event_type == "media":
-                # Twilio sends base64-encoded G.711 μ-law audio in data['media']['payload']
+                # Twilio sends base64-encoded G.711 μ-law audio
+                # Convert to PCM16 for OpenAI
                 try:
+                    ulaw_audio = base64.b64decode(data["media"]["payload"])
+                    pcm16_audio = ulaw_to_pcm16(ulaw_audio)
+                    pcm16_b64 = base64.b64encode(pcm16_audio).decode("utf-8")
+
                     audio_append = {
                         "type": "input_audio_buffer.append",
-                        "audio": data["media"]["payload"],
+                        "audio": pcm16_b64,
                     }
                     await openai_ws.send(json.dumps(audio_append))
                 except Exception as e:
@@ -565,20 +584,21 @@ async def _openai_to_twilio(
                 stream_sid = ACTIVE_SESSIONS.get(session_id, {}).get("stream_sid")
 
             # Audio packets from OpenAI → Twilio media events
-            if event_type == "response.output_audio.delta" and response.get("delta"):
+            if (event_type == "response.audio.delta" or event_type == "response.output_audio.delta") and response.get("delta"):
                 if not stream_sid:
                     # We don't yet know where to send this audio
                     continue
 
                 try:
-                    # The delta is base64-encoded audio/pcmu.
-                    # Re-encode to be safe before sending to Twilio.
-                    decoded = base64.b64decode(response["delta"])
-                    audio_payload = base64.b64encode(decoded).decode("utf-8")
+                    # OpenAI sends base64-encoded PCM16 audio
+                    # Convert to μ-law for Twilio
+                    pcm16_audio = base64.b64decode(response["delta"])
+                    ulaw_audio = pcm16_to_ulaw(pcm16_audio)
+                    audio_payload = base64.b64encode(ulaw_audio).decode("utf-8")
 
                     if first_audio:
                         logger.info(
-                            f"✅ First audio packet from OpenAI - bytes: {len(decoded)}"
+                            f"✅ First audio packet from OpenAI - PCM16 bytes: {len(pcm16_audio)}, μ-law bytes: {len(ulaw_audio)}"
                         )
                         first_audio = False
 
