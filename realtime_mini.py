@@ -465,11 +465,12 @@ async def initialize_session(openai_ws):
         "session": {
             "type": "realtime",
             "model": "gpt-4o-mini-realtime-preview",
-            "output_modalities": ["audio"],
+            "output_modalities": ["audio", "text"],
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcmu"},
                     "turn_detection": {"type": "server_vad"},
+                    "transcription": {"model": "whisper-1"},
                 },
                 "output": {
                     "format": {"type": "audio/pcmu"},
