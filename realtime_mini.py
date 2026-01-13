@@ -5,7 +5,6 @@ import uuid
 import base64
 import asyncio
 import logging
-import audioop
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, Request
@@ -488,19 +487,6 @@ async def initialize_session(openai_ws):
 
 
 # ============================================================
-#  Audio Conversion Helpers
-# ============================================================
-
-def ulaw_to_pcm16(ulaw_data: bytes) -> bytes:
-    """Convert G.711 μ-law audio to 16-bit PCM."""
-    return audioop.ulaw2lin(ulaw_data, 2)  # 2 = 16-bit samples
-
-def pcm16_to_ulaw(pcm_data: bytes) -> bytes:
-    """Convert 16-bit PCM audio to G.711 μ-law."""
-    return audioop.lin2ulaw(pcm_data, 2)  # 2 = 16-bit samples
-
-
-# ============================================================
 #  Twilio -> OpenAI
 # ============================================================
 
@@ -530,14 +516,16 @@ async def _twilio_to_openai(
                 logger.info(f"Twilio stream started - SID: {stream_sid}, CallSID: {call_sid}")
 
             elif event_type == "media":
-                # Twilio sends base64-encoded G.711 μ-law audio
-                # Convert to PCM16 for OpenAI
-                if openai_ws.open:
+                # Twilio sends base64-encoded G.711 μ-law audio in data['media']['payload']
+                try:
                     audio_append = {
                         "type": "input_audio_buffer.append",
                         "audio": data["media"]["payload"],
                     }
                     await openai_ws.send(json.dumps(audio_append))
+                except Exception as e:
+                    logger.debug(f"Error sending audio to OpenAI: {e}")
+                    break
 
             elif event_type == "stop":
                 logger.info("Twilio stream stopped")
@@ -585,16 +573,14 @@ async def _openai_to_twilio(
                     continue
 
                 try:
-                    # OpenAI sends base64-encoded PCM16 audio
-                    # Convert to μ-law for Twilio
+                    # The delta is base64-encoded audio/pcmu.
+                    # Re-encode to be safe before sending to Twilio.
                     decoded = base64.b64decode(response["delta"])
-                    pcm16_audio = decoded
-                    ulaw_audio = decoded
                     audio_payload = base64.b64encode(decoded).decode("utf-8")
 
                     if first_audio:
                         logger.info(
-                            f"✅ First audio packet from OpenAI - PCM16 bytes: {len(pcm16_audio)}, μ-law bytes: {len(ulaw_audio)}"
+                            f"✅ First audio packet from OpenAI - bytes: {len(decoded)}"
                         )
                         first_audio = False
 
