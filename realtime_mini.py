@@ -463,7 +463,8 @@ async def initialize_session(openai_ws):
             "type": "realtime",
             "model": "gpt-4o-mini-realtime-preview",  # Mini model
             # Only need audio back from the model; text is optional
-            "output_modalities": ["audio"],
+            "output_modalities": ["audio", "text"],
+            "input_audio_transcription": {"model": "whisper-1"},
             "audio": {
                 "input": {
                     # Twilio sends G.711 μ-law as base64-encoded bytes
@@ -521,12 +522,15 @@ async def _twilio_to_openai(
 
             elif event_type == "media":
                 # Twilio sends base64-encoded G.711 μ-law audio in data['media']['payload']
-                if openai_ws.open:
+                try:
                     audio_append = {
                         "type": "input_audio_buffer.append",
                         "audio": data["media"]["payload"],
                     }
                     await openai_ws.send(json.dumps(audio_append))
+                except Exception as e:
+                    logger.debug(f"Error sending audio to OpenAI: {e}")
+                    break
 
             elif event_type == "stop":
                 logger.info("Twilio stream stopped")
