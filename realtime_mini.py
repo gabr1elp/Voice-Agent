@@ -387,10 +387,13 @@ async def media_stream(websocket: WebSocket):
                 _openai_to_twilio(websocket, openai_ws, session_id),
             )
 
+    except WebSocketDisconnect:
+        logger.info("Twilio WebSocket disconnected normally")
     except Exception as e:
         logger.error(f"Error in /media-stream handler: {e}")
     finally:
         # Log call summary before cleanup
+        logger.info(f"🧹 FINALLY BLOCK ENTERED for session: {session_id}")
         try:
             logger.info(f"Starting cleanup for session: {session_id}")
             session_data = ACTIVE_SESSIONS.get(session_id, {})
