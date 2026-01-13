@@ -388,11 +388,14 @@ async def media_stream(websocket: WebSocket):
         logger.error(f"Error in /media-stream handler: {e}")
     finally:
         # Log call summary before cleanup
+        logger.info(f"Starting cleanup for session: {session_id}")
         session_data = ACTIVE_SESSIONS.get(session_id, {})
         transcripts = session_data.get("transcripts", [])
         call_sid = session_data.get("call_sid", "Unknown")
         from_number = session_data.get("from_number", "Unknown")
         to_number = session_data.get("to_number", "Unknown")
+
+        logger.info(f"Found {len(transcripts)} transcripts for session {session_id}")
 
         # Calculate call duration
         start_time = session_data.get("start_time", time.time())
@@ -413,6 +416,7 @@ async def media_stream(websocket: WebSocket):
                 }
             )
         else:
+            logger.info("No transcripts found, logging with default summary")
             log_call_event(
                 call_sid=call_sid,
                 from_number=from_number,
@@ -420,7 +424,8 @@ async def media_stream(websocket: WebSocket):
                 event_type="call_ended",
                 data={
                     "summary": "No conversation recorded",
-                    "duration": duration
+                    "duration": duration,
+                    "transcript_count": 0
                 }
             )
 
