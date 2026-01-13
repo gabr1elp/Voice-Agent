@@ -382,10 +382,13 @@ async def media_stream(websocket: WebSocket):
             await initialize_session(openai_ws)
 
             # Bridge audio both ways
-            await asyncio.gather(
+            # Use return_exceptions=True so cleanup runs even if tasks fail
+            results = await asyncio.gather(
                 _twilio_to_openai(websocket, openai_ws, session_id),
                 _openai_to_twilio(websocket, openai_ws, session_id),
+                return_exceptions=True
             )
+            logger.info(f"Gather completed with results: {[type(r).__name__ for r in results]}")
 
             # IMPORTANT: Do cleanup immediately after gather completes
             # Don't wait for finally block (FastAPI may cancel the task)
@@ -434,12 +437,30 @@ async def media_stream(websocket: WebSocket):
                 ACTIVE_SESSIONS.pop(session_id, None)
                 logger.info(f"✅ Session cleanup complete: {session_id}")
             except Exception as cleanup_error:
-                logger.error(f"Error during cleanup: {cleanup_error}")
+                logger.error(f"❌ Error during cleanup: {cleanup_error}")
 
-    except WebSocketDisconnect:
-        logger.info("Twilio WebSocket disconnected normally")
     except Exception as e:
-        logger.error(f"Error in /media-stream handler: {e}")
+        logger.error(f"❌ Error in /media-stream handler: {e}")
+        # Still try to cleanup even on error
+        try:
+            logger.info(f"Attempting cleanup after error for session: {session_id}")
+            session_data = ACTIVE_SESSIONS.get(session_id, {})
+            if session_data:
+                call_sid = session_data.get("call_sid", "Unknown")
+                from_number = session_data.get("from_number", "Unknown")
+                to_number = session_data.get("to_number", "Unknown")
+                start_time = session_data.get("start_time", time.time())
+                duration = int(time.time() - start_time)
+                log_call_event(
+                    call_sid=call_sid,
+                    from_number=from_number,
+                    to_number=to_number,
+                    event_type="call_ended",
+                    data={"summary": "Call ended with error", "duration": duration, "transcript_count": 0}
+                )
+            ACTIVE_SESSIONS.pop(session_id, None)
+        except Exception as e2:
+            logger.error(f"Failed to cleanup after error: {e2}")
 
 
 # ============================================================
