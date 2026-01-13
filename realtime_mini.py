@@ -41,22 +41,25 @@ if not VOICE_SYSTEM_PROMPT:
     VOICE_SYSTEM_PROMPT = """
 You are Gabriel Pascual's personal voice assistant.
 
-Gabriel is a Data/AI specialist based in Tampa, FL. He builds AI-driven solutions, agent architectures, and full-stack applications using Python, Azure AI, FastAPI, React, and OpenAI APIs. He's also a photographer and founder of ShotByPascual.
+Gabriel is a Data/AI specialist based in Tampa, FL. He builds AI solutions and full-stack applications. He's also a photographer.
 
-YOUR MAIN GOAL: Find out why they're calling and schedule a meeting with Gabriel.
+YOUR GOAL: Find out why they're calling and help schedule a meeting with Gabriel.
 
-HOW TO HANDLE CALLS:
-- Keep responses brief and natural
-- Ask who's calling and what brings them to reach out
-- Listen for opportunities to schedule a meeting or call
-- Be genuinely curious about connecting them with Gabriel
-- Get their name, company (if applicable), phone number, and best times to meet
+IMPORTANT RULES:
+- Ask ONE question at a time, then STOP and wait for their answer
+- Listen carefully - let them finish speaking before responding
+- Keep responses very brief (1-2 sentences maximum)
+- If they pause, wait - don't fill silence with more questions
+- Be warm but efficient
 
-TONE:
-- Warm, professional, and conversational
-- Keep it short - avoid long explanations
-- Focus on moving toward scheduling a time to connect
-- Never mention the technical tools you're using
+CONVERSATION FLOW:
+1. Greet them and ask how you can help
+2. Wait for their response
+3. Ask for their name if needed
+4. Offer to schedule a meeting
+5. Get their contact info and preferred times
+
+Never mention technical tools you're using.
 """
 
 if not OPENAI_API_KEY:
@@ -388,49 +391,52 @@ async def media_stream(websocket: WebSocket):
         logger.error(f"Error in /media-stream handler: {e}")
     finally:
         # Log call summary before cleanup
-        logger.info(f"Starting cleanup for session: {session_id}")
-        session_data = ACTIVE_SESSIONS.get(session_id, {})
-        transcripts = session_data.get("transcripts", [])
-        call_sid = session_data.get("call_sid", "Unknown")
-        from_number = session_data.get("from_number", "Unknown")
-        to_number = session_data.get("to_number", "Unknown")
+        try:
+            logger.info(f"Starting cleanup for session: {session_id}")
+            session_data = ACTIVE_SESSIONS.get(session_id, {})
+            transcripts = session_data.get("transcripts", [])
+            call_sid = session_data.get("call_sid", "Unknown")
+            from_number = session_data.get("from_number", "Unknown")
+            to_number = session_data.get("to_number", "Unknown")
 
-        logger.info(f"Found {len(transcripts)} transcripts for session {session_id}")
+            logger.info(f"Found {len(transcripts)} transcripts for session {session_id}")
 
-        # Calculate call duration
-        start_time = session_data.get("start_time", time.time())
-        duration = int(time.time() - start_time)
+            # Calculate call duration
+            start_time = session_data.get("start_time", time.time())
+            duration = int(time.time() - start_time)
 
-        if transcripts:
-            summary = generate_call_summary(transcripts)
-            logger.info(f"Call summary: {summary}")
-            log_call_event(
-                call_sid=call_sid,
-                from_number=from_number,
-                to_number=to_number,
-                event_type="call_ended",
-                data={
-                    "summary": summary,
-                    "transcript_count": len(transcripts),
-                    "duration": duration
-                }
-            )
-        else:
-            logger.info("No transcripts found, logging with default summary")
-            log_call_event(
-                call_sid=call_sid,
-                from_number=from_number,
-                to_number=to_number,
-                event_type="call_ended",
-                data={
-                    "summary": "No conversation recorded",
-                    "duration": duration,
-                    "transcript_count": 0
-                }
-            )
+            if transcripts:
+                summary = generate_call_summary(transcripts)
+                logger.info(f"Call summary: {summary}")
+                log_call_event(
+                    call_sid=call_sid,
+                    from_number=from_number,
+                    to_number=to_number,
+                    event_type="call_ended",
+                    data={
+                        "summary": summary,
+                        "transcript_count": len(transcripts),
+                        "duration": duration
+                    }
+                )
+            else:
+                logger.info("No transcripts found, logging with default summary")
+                log_call_event(
+                    call_sid=call_sid,
+                    from_number=from_number,
+                    to_number=to_number,
+                    event_type="call_ended",
+                    data={
+                        "summary": "No conversation recorded",
+                        "duration": duration,
+                        "transcript_count": 0
+                    }
+                )
 
-        ACTIVE_SESSIONS.pop(session_id, None)
-        logger.info(f"Session ended: {session_id}")
+            ACTIVE_SESSIONS.pop(session_id, None)
+            logger.info(f"Session ended: {session_id}")
+        except Exception as cleanup_error:
+            logger.error(f"Error during cleanup: {cleanup_error}")
 
 
 # ============================================================
@@ -474,7 +480,12 @@ async def initialize_session(openai_ws):
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcmu"},
-                    "turn_detection": {"type": "server_vad"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500
+                    },
                 },
                 "output": {
                     "format": {"type": "audio/pcmu"},
