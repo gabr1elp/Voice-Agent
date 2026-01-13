@@ -228,7 +228,7 @@ def log_call_event(call_sid: str, from_number: str, to_number: str, event_type: 
 
 def generate_call_summary(transcripts: list) -> str:
     """
-    Generate a simple summary from the conversation transcripts.
+    Generate a narrative summary from the conversation transcripts.
     """
     if not transcripts:
         return "No conversation recorded"
@@ -236,17 +236,32 @@ def generate_call_summary(transcripts: list) -> str:
     user_messages = [t for t in transcripts if t.get("role") == "user"]
     ai_messages = [t for t in transcripts if t.get("role") == "assistant"]
 
-    summary = f"Call duration: {len(transcripts)} exchanges. "
-    summary += f"User spoke {len(user_messages)} times. "
-    summary += f"AI responded {len(ai_messages)} times."
+    # Build a conversational summary
+    summary_parts = []
 
-    # Add first user message as context
+    # Who called and what was discussed
     if user_messages:
-        first_msg = user_messages[0].get("content", "")
-        if first_msg:
-            summary += f" Initial topic: {first_msg[:100]}"
+        user_text = " ".join([m.get("content", "") for m in user_messages])
 
-    return summary
+        # Create a brief narrative summary
+        if len(user_text) > 10:
+            summary_parts.append(f"Caller said: {user_text[:200]}...")
+
+        # Add AI responses that contain key info (like scheduling, next steps)
+        key_phrases = ["schedule", "meeting", "call back", "email", "contact", "available", "time"]
+        ai_summary = []
+        for msg in ai_messages:
+            content = msg.get("content", "").lower()
+            if any(phrase in content for phrase in key_phrases):
+                ai_summary.append(msg.get("content", ""))
+
+        if ai_summary:
+            summary_parts.append(f"Response: {' '.join(ai_summary)[:200]}...")
+
+    if not summary_parts:
+        return f"Brief call - {len(transcripts)} exchanges"
+
+    return " | ".join(summary_parts)
 
 
 # ============================================================
